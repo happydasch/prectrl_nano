@@ -2,121 +2,75 @@
 #include <TimerOne.h>
 #include <SoftwareSerial.h>
 
-#define PIN_O_PWM 10                    // D10 timer1
-#define PIN_O_LGHT 3                    // D3  Light request from controller
-#define PIN_I_PAS 2                     // D2
-#define PIN_I_TORQUE A0                 // A0
-#define PIN_I_THROTTLE A1               // A1
-#define PIN_D_RX 5                      // D5  RX from display
-#define PIN_C_RX 6                      // D6  RX from controller
-#define PIN_TX -1                       // -1, TX, -1 = do not use
+// pin definitions
+#define PIN_O_PWM 10                                  // D10 timer1
+#define PIN_O_LGHT 3                                  // D3  Light request from controller
+#define PIN_I_PAS 2                                   // D2
+#define PIN_I_TORQUE A0                               // A0
+#define PIN_I_THROTTLE A1                             // A1
+#define PIN_D_RX 5                                    // D5  RX from display
+#define PIN_C_RX 6                                    // D6  RX from controller
+
+// misc constants
+#define TICK_INTERVAL 100                             // time interval between two timer interrupts in µs (100 == 0.1ms, 10khz)
+#define SIGNAL_UPDATE 10000/TICK_INTERVAL             // interval for reading signal values (in ticks: µs/tick_interval)
+#define SERIAL_UPDATE 50000/TICK_INTERVAL             // interval for reading serial values (in ticks: µs/tick_interval)
+#define PAS_TIMEOUT 500000/TICK_INTERVAL              // timeout for PWM with no PAS signal (in ticks: µs/tick_interval)
+#define PAS_PULSE_TIMEOUT 20000/TICK_INTERVAL         // timeout for single PAS pulses (in ticks: µs/tick_interval)
+#define PAS_FACTOR 60000000/TICK_INTERVAL/PAS_PULSES  // factor to convert PAS pulses to RPM (60.000.000ms == 60s == 1min / PAS pulses)
+                                                      // duration for 1 pas pulse in ticks: µs/tick_interval
+#define RESET_PID_ON_NO_TORQUE false                  // reset PID controller when no torque is applied
+#define TORQUE_THROTTLE_MAX_NM 40                     // torque in nm that will give full throttle
+#define TORQUE_MIN 330                                // min torque = 0 (1,5V -> needs to be calibrated)
+#define TORQUE_MAX 480                                // max torque (around 3,0V -> needs to be calibrated)
+#define THROTTLE_MIN 250                              // min throttle
+#define THROTTLE_MAX 750                              // max throttle
+#define PAS_PULSES 36                                 // number of pulses per revolution for PAS signal
+
 #define DEBUG false
 
-#define TICK_INTERVAL 100               // time interval between two timer interrupts in µs (100 == 0.1ms, 10khz)
-
-#define TORQUE_MIN 300                  // min torque = 0 (1,5V -> needs to be calibrated)
-#define TORQUE_MAX 450                  // max torque (around 3,0V -> needs to be calibrated)
-#define THROTTLE_MIN 200                // min throttle
-#define THROTTLE_MAX 750                // max throttle
-#define PAS_PULSES 36                   // number of pulses per revolution for PAS signal
-#define SIGNAL_UPDATE 1000/TICK_INTERVAL             // interval for reading signal values (in ticks)
-#define PAS_TIMEOUT 500000/TICK_INTERVAL              // timeout for PWM with no PAS signal (in ticks)
-#define PAS_PULSE_TIMEOUT 20000/TICK_INTERVAL         // timeout for single PAS pulses (in ticks)
-#define PAS_FACTOR 60000000/TICK_INTERVAL/PAS_PULSES  // factor to convert PAS pulses to RPM (60.000.000ms == 60s == 1min / PAS pulses)
-#define TORQUE_THROTTLE_MAX 20                        // torque in nm that will give full throttle
-
+// global variables
 volatile unsigned int tick_pas_counter = 0xFFFF;      // counter for ticks between two pas pulses
 volatile unsigned int tick_timeout_counter = 0;       // counter for timeout between two pas pulses
 volatile unsigned int signal_counter = 0;             // counter for signal updates
+volatile unsigned int serial_counter = 0;             // counter for serial updates
 volatile bool interrupt_pas = false;                  // flag for pas interrupt
 
-uint8_t serial_buffer[13];              // buffer for received data (used for both sides)
-byte serial_pos = 0;                    // counter for recieved bytes
-bool pedaling = false;                  // flag for pedaling
-double cadence = 0.0;                   // current cadence
-double factor[] = {                     // factors for support levels 0-5
+uint8_t serial_buffer[13];                            // buffer for received data (used for both sides)
+byte serial_pos = 0;                                  // counter for recieved bytes
+bool pedaling = false;                                // flag for pedaling
+double cadence_current = 0.0;                         // current cadence
+double factor[] = {                                   // factors for support levels 0-5
   0.0, 0.75, 1, 1.25, 1.5, 2.0};
-int torque_current = 0;                 // current torque reading
-int torque_low = 0;                     // lowest torque measurement value (will be set at startup)
-double torque_latest = 0.0;             // latest torque measurement in Nm
-double torque = 0.0;                    // current torque calculated in Nm
-double torque_sum = 0.0;                // sum of torque measurements
-int torque_values[PAS_PULSES];          // current torque measurement values
-double power_input = 0.0;               // current power provided by driver
-unsigned int torque_pas_ticks = 0;      // current pas duration in ticks
-unsigned int torque_pas_idx = 0;        // current pas pulse index
-int throttle_current = 0;               // current throttle value
-unsigned int throttle_low = 0;          // lowest throttle measurement value (will be set at startup)
-unsigned int pwm_output = 0;            // pwm output
+int torque_reading = 0;                               // latest torque reading
+int torque_low = 0;                                   // lowest torque measurement value (will be set at startup)
+double torque_current = 0.0;                          // current torque measurement in Nm
+double torque_avg = 0.0;                              // avg torque calculated in Nm
+double torque_sum = 0.0;                              // sum of torque measurements
+int torque_values[PAS_PULSES];                        // current torque measurement values
+double power_input = 0.0;                             // current power provided by driver
+unsigned int torque_pas_ticks = 0;                    // current pas duration in ticks
+unsigned int torque_pas_idx = 0;                      // current pas pulse index
+unsigned int throttle_reading = 0;                    // current throttle reading
+unsigned int throttle_low = 0;                        // lowest throttle measurement value (will be set at startup)
+unsigned int pwm_output = 0;                          // new pwm output
+unsigned int last_pwm_output = 0;                     // last pwm output
 
 // serial readings
-unsigned int reading_level = 3;         // reading support level (default 3)
-unsigned int reading_light = 0;         // reading light status
-float reading_wheel_size = 0.0;         // reading wheel size
-unsigned int reading_max_speed = 0;     // reading max speed
-unsigned int reading_power = 0;         // reading power
+unsigned int level_current = 3;                       // current support level (default 3)
+unsigned int light_current = 0;                       // current light status
+double wheel_size_current = 0.0;                      // current wheel size
+unsigned int max_speed_current = 0;                   // current max speed
+unsigned int power_current = 0;                       // current power
 
-float calc_speed = 0;            // calculated speed
+double calc_speed = 0;                                // calculated speed
 
 extern TimerOne timer1;
 double k_p = 1.03, k_i = 0.5, k_d = 0;
-double pid_in, pid_out, pid_set;
-PID m_pid(&pid_in, &pid_out, &pid_set, k_p, k_i, k_d, DIRECT);
-SoftwareSerial display_serial = SoftwareSerial(PIN_D_RX, PIN_TX);
-SoftwareSerial controller_serial = SoftwareSerial(PIN_C_RX, PIN_TX);
-
-/**
- * @brief Upates the set_point value for the PID controller
- *
- */
-void set_point() {
-  /*
-  sollGas=minGas+500.0*Faktor[actstuf]*sumTorque/actPAS*(1+actV/maxV);   //Berechunung Gasstellwert: Faktor*MenschlicheLeistung*(1+v/vmax) 7m/s*10^6µs/1000mm  *(1+Radumfang/(actTacho*7000.0*TIC_RATE))
-  if (sollGas>65535){                                                 //Auf 16Bit Schreiben PWM-Ausgabe beschränken.
-    sollGas=65535;
-    }
-  */
-
-  Serial.print("power_input: ");
-  Serial.print(power_input);
-  Serial.print(", torque: ");
-  Serial.print(torque);
-  Serial.print(", cadence: ");
-  Serial.print(cadence);
-  Serial.print(", diff: ");
-  Serial.print((power_input-torque));
-  Serial.println();
-  /*
-  #ifdef SUPPORT_TORQUE_THROTTLE                              //we want to trigger throttle just by pedal torque
-  if (abs(torque_instant)>torque_throttle_min)            //we are above the threshold to trigger throttle
-  {
-    double power_torque_throttle = abs(torque_instant/torque_throttle_full*poti_stat/1023*curr_power_max);  //translate torque_throttle_full to maximum power
-    power_throttle = max(power_throttle,power_torque_throttle); //decide if thumb throttle or torque throttle are higher
-    power_throttle = constrain(power_throttle,0,curr_power_max); //constrain throttle value to maximum power
-  }
-  #endif
-  */
-    // power_poti = poti_stat/102300.0* curr_power_poti_max*power_human*(1+spd/20.0); //power_poti_max is in this control mode interpreted as percentage. Example: power_poti_max=200 means; motor power = 200% of human power
-
-    //    power_poti = poti_stat/102300.0* curr_power_poti_max*power_human*(1+spd/20.0);  //power_poti_max is in this control mode interpreted as percentage. Example: power_poti_max=200 means; motor power = 200% of human power
-    //double power_torque_throttle = abs(torque_instant/torque_throttle_full*poti_stat/1023*curr_power_max);  //translate torque_throttle_full to maximum power
-  // FIXME this needs to be tested, intention is to grow throttle while human power is added
-
-  /*pid_in = (torque/TORQUE_THROTTLE_MAX) * 1024;
-  pid_set = ((power_input/TORQUE_THROTTLE_MAX) / factor[current_level]) * 1024;
-  // pid_in = (torque/TORQUE_THROTTLE_MAX);
-  m_pid.Compute();
-  Serial.print("pid_in: ");
-  Serial.print(pid_in);
-  Serial.print(", pid_set: ");
-  Serial.print(pid_set);
-  Serial.print(", pid_out: ");
-  Serial.print(pid_out);
-  Serial.println();
-  */
-
-  return;
-}
+double pid_in = 0, pid_out = 0, pid_set = 0;
+PID pid_throttle(&pid_in, &pid_out, &pid_set, k_p, k_i, k_d, DIRECT);
+SoftwareSerial display_serial = SoftwareSerial(PIN_D_RX, -1);
+SoftwareSerial controller_serial = SoftwareSerial(PIN_C_RX, -1);
 
 /**
  * @brief Function for interrupt calls every tick
@@ -131,6 +85,9 @@ void interrupt_time_tick() {
   }
   if (signal_counter < 0xFFFF) {
     signal_counter++;
+  }
+  if (serial_counter < 0xFFFF) {
+    serial_counter++;
   }
 }
 
@@ -157,80 +114,81 @@ void _process_display_message() {
   unsigned int max_speed = 10 + (((serial_buffer[2] & 0xF8) >> 3) | (serial_buffer[4] & 0x20));
   unsigned int wheel_size = ((serial_buffer[4] & 0xC0) >> 6) | ((serial_buffer[2] & 0x07) << 2);
 
-  if (curr_light != reading_light) {
-    reading_light = curr_light;
-    digitalWrite(PIN_O_LGHT, reading_light);
+  if (curr_light != light_current) {
+    light_current = curr_light;
+    digitalWrite(PIN_O_LGHT, light_current);
   }
-  reading_level = curr_level;
-  reading_max_speed = max_speed;
+  level_current = curr_level;
+  max_speed_current = max_speed;
   switch (wheel_size) {
     case 0x12: // 6''
-    reading_wheel_size = 468.75;
+    wheel_size_current = 468.75;
     break;
 
     case 0x0A: // 8''
-    reading_wheel_size = 628.47;
+    wheel_size_current = 628.47;
     break;
 
     case 0x0E: // 10''
-    reading_wheel_size = 788.19;
+    wheel_size_current = 788.19;
     break;
 
     case 0x02: // 12''
-    reading_wheel_size = 947.91;
+    wheel_size_current = 947.91;
     break;
 
     case 0x06: // 14''
-    reading_wheel_size = 1107.64;
+    wheel_size_current = 1107.64;
     break;
 
     case 0x00: // 16''
-    reading_wheel_size = 1267.36;
+    wheel_size_current = 1267.36;
     break;
 
     case 0x04: // 18''
-    reading_wheel_size = 1427.08;
+    wheel_size_current = 1427.08;
     break;
 
     case 0x08: // 20''
-    reading_wheel_size = 1576.39;
+    wheel_size_current = 1576.39;
     break;
 
     case 0x0C: // 22''
-    reading_wheel_size = 1743.05;
+    wheel_size_current = 1743.05;
     break;
 
     case 0x10: // 24''
-    reading_wheel_size = 1895.83;
+    wheel_size_current = 1895.83;
     break;
 
     case 0x18: // 700c
-    reading_wheel_size = 2173.61;
+    wheel_size_current = 2173.61;
     break;
 
     case 0x1C: // 28''
-    reading_wheel_size = 2194.44;
+    wheel_size_current = 2194.44;
     break;
 
     case 0x1E: // 29''
-    reading_wheel_size = 2250;
+    wheel_size_current = 2250;
     break;
 
     case 0x14: // 26''
     default: // 26''
-    reading_wheel_size = 2060;
+    wheel_size_current = 2060;
     break;
   }
 
   #if DEBUG == true
+  Serial.println("_process_display_message");
   Serial.print("light: ");
-  Serial.print(reading_light);
+  Serial.print(light_current);
   Serial.print(", level: ");
-  Serial.print(reading_level);
+  Serial.print(level_current);
   Serial.print(", max_speed: ");
-  Serial.print(reading_max_speed);
+  Serial.print(max_speed_current);
   Serial.print(", wheel_size: ");
-  Serial.print(reading_wheel_size);
+  Serial.print(wheel_size_current);
   Serial.println();
   #endif
 }
@@ -240,24 +198,27 @@ void _process_display_message() {
  *
  */
 void _process_controller_message() {
-  float rotation_ms = (serial_buffer[3] * 0xFF) + serial_buffer[4];
+  double rotation_ms = (serial_buffer[3] * 0xFF) + serial_buffer[4];
   unsigned int power = serial_buffer[8] * 13;  // 13W per unit
-  reading_power = power;
-  calc_speed = 3600 * (reading_wheel_size / rotation_ms / 1000);
+
+  power_current = power;
+  calc_speed = 3600 * (wheel_size_current / rotation_ms / 1000);
   if (rotation_ms >= 6895) {
     // if a wheel rotation takes over 6 seconds the speed
     // is set to 0
     // the highest value returned for rotation_ms is 6895
     calc_speed = 0;
   }
+
   #if DEBUG == true
+  Serial.println("_process_controller_message");
   Serial.print("power: ");
-  Serial.print(reading_power);
+  Serial.print(power_current);
   Serial.print(", rotation_ms: ");
   Serial.print(rotation_ms);
   Serial.print(", speed: ");
   Serial.print(calc_speed);
-  Serial.println()
+  Serial.println();
   #endif
 }
 
@@ -367,52 +328,48 @@ void read_software_serial() {
 }
 
 /**
- * @brief Reads in the the current throttle value
+ * @brief Reads in the throttle value
  *
  */
 void read_throttle() {
-  /**
-   * @brief Reads the current throttle value and normalizes it
-   *
-   */
-  throttle_current = analogRead(PIN_I_THROTTLE);
+  throttle_reading = analogRead(PIN_I_THROTTLE);
   #if DEBUG == true
-  Serial.print("throttle_current before: ");
-  Serial.print(throttle_current);
-  #endif
-  throttle_current = map(throttle_current, throttle_low, THROTTLE_MAX, 0, 1023);
-  if (throttle_current < 10) {
-    throttle_current = 0;
-  }
-  throttle_current = constrain(throttle_current, 0, 1023);
-  #if DEBUG == true
-  Serial.print(" throttle_current after: ");
-  Serial.print(throttle_current);
+  Serial.println("read_throttle");
+  Serial.print("throttle_reading: ");
+  Serial.print(throttle_reading);
   Serial.println();
   #endif
 }
 
 /**
- * @brief Reads in the current torque value
+ * @brief Reads in the torque value
  *
  */
 void read_torque() {
-  /**
-   * @brief Reads current torque value and normalizes it
-   *
-   */
-  torque_current = analogRead(PIN_I_TORQUE) - torque_low;
+  torque_reading = analogRead(PIN_I_TORQUE);
   #if DEBUG == true
-  Serial.print("torque_current before: ");
-  Serial.print(torque_current);
+  Serial.println("read_torque");
+  Serial.print("torque_reading: ");
+  Serial.print(torque_reading);
+  Serial.println();
   #endif
-  if (torque_current < 20) {
-    torque_current = 0;
-  }
-  torque_current = constrain(torque_current, 0, 1023);
+}
+
+/**
+ * @brief Upates the set_point value for the PID controller
+ *
+ */
+void set_point() {
+  pid_in = torque_current - power_input * factor[level_current];
+  pid_throttle.Compute();
   #if DEBUG == true
-  Serial.print(" torque_current after: ");
-  Serial.print(torque_current);
+  Serial.println("set_point");
+  Serial.print("pid_in: ");
+  Serial.print(pid_in);
+  Serial.print(",  spid_set: ");
+  Serial.print(pid_set);
+  Serial.print(", pid_out: ");
+  Serial.print(pid_out);
   Serial.println();
   #endif
 }
@@ -422,7 +379,11 @@ void read_torque() {
  *
  * @param torque_new new torque reading
  */
-void update_torque(int torque_new) {
+void update_torque(double torque_new) {
+  torque_new -= torque_low;
+  if (torque_new < 0) {
+    torque_new = 0;
+  }
   // add current reading to valeus array
   torque_values[torque_pas_idx] = torque_new;
   if (torque_pas_idx++ >= PAS_PULSES - 1) {
@@ -434,31 +395,37 @@ void update_torque(int torque_new) {
     torque_sum += torque_values[i];
   }
   // update cadence
-  cadence = 0;
+  cadence_current = 0;
   if (torque_pas_ticks > 0) {
-    cadence = (PAS_FACTOR / torque_pas_ticks) * pedaling;
-    cadence /= 2;
+    cadence_current = (PAS_FACTOR / torque_pas_ticks) * pedaling;
+    cadence_current *= 0.5;
   }
-  // update latest torque in Nm
+  // update current torque in Nm
   // multiplication constant for SEMPU and T9 is approx. 0.33Nm/count
-  torque_latest = 0.33 * torque_current * pedaling;
+  torque_current = 0.33 * torque_new * pedaling;
   // update avg torque in Nm
   // 36/1023 = 0.03519061584: T9 has 36 pulses per revolution
-  torque = 0.03519061584 * torque_sum * pedaling;
+  torque_avg = 0.03519061584 * torque_sum * pedaling;
+  // update current power input in nm
   // power = 2 * pi * cadence * torque / 60s -> (2 * pi / 60) * cadence * torque
-  power_input = 0.10471975512 * cadence * torque;
-  // FIXME is this needed: update pid if no torque
+  // (2 * pi / 60) = 0.10471975512
+  power_input = 0.10471975512 * cadence_current * torque_avg;
+  // update pid if no torque
   if (torque_new == 0) {
-    //m_pid.ShrinkIntegral();
-    m_pid.ResetIntegral();
+    if (RESET_PID_ON_NO_TORQUE) {
+      pid_throttle.ResetIntegral();
+    } else {
+      pid_throttle.ShrinkIntegral();
+    }
   }
   #if DEBUG == true
-  Serial.print("torque_latest: ");
-  Serial.print(torque_latest);
-  Serial.print(" torque: ");
-  Serial.print(torque);
-  Serial.print(" cadence: ");
-  Serial.print(cadence);
+  Serial.println("update_torque");
+  Serial.print("torque_current: ");
+  Serial.print(torque_current);
+  Serial.print(" torque_avg: ");
+  Serial.print(torque_avg);
+  Serial.print(" cadence_current: ");
+  Serial.print(cadence_current);
   Serial.print(" power_input: ");
   Serial.print(power_input);
   Serial.println();
@@ -466,10 +433,10 @@ void update_torque(int torque_new) {
 }
 
 /**
- * @brief Updates the state of pedaling
+ * @brief Updates the state of pas
  *
  */
-void update_state() {
+void update_pas_state() {
   if (tick_pas_counter >= PAS_TIMEOUT) {
     pedaling = false;
     if (tick_timeout_counter >= PAS_PULSE_TIMEOUT) {
@@ -482,6 +449,7 @@ void update_state() {
     tick_timeout_counter = 0;
   }
   #if DEBUG == true
+  Serial.println("update_pas_state");
   Serial.print("pedaling: ");
   Serial.print(pedaling);
   Serial.print(" tick_pas_counter: ");
@@ -500,28 +468,33 @@ void update_pwm_output() {
   pwm_output = 0;
   // torque based throttle
   if (pedaling) {
-    pwm_output = pid_out + throttle_low;
+    // pid_out is in range 0-1023
+    pwm_output = pid_out;
   }
   // throttle override
-  if (throttle_current) {
-    // use average throttle value instead of latest reading
-    pwm_output = throttle_current;
+  if (throttle_reading > throttle_low) {
+    // extend throttle range to 0-1023 from real low to constant high
+    unsigned int throttle_temp = map(
+      throttle_reading, throttle_low, THROTTLE_MAX, 0, 1023);
+    if (throttle_temp > THROTTLE_MIN && throttle_temp > pwm_output) {
+      pwm_output = throttle_temp;
+    }
   }
   // ensure pwm output is within bounds
-  if (pwm_output < 0) {
-    pwm_output = 0;
+  pwm_output = constrain(pwm_output, 0, 1023);
+  // map pwm output value to throttle min and max values
+  pwm_output = map(pwm_output, 0, 1023, THROTTLE_MIN, THROTTLE_MAX);
+  if (pwm_output != last_pwm_output) {
+    // update pwm duty cycle
+    timer1.pwm(PIN_O_PWM, pwm_output);
+    last_pwm_output = pwm_output;
+    #if DEBUG == true
+    Serial.println("update_pwm_output");
+    Serial.print("pwm_output: ");
+    Serial.print(pwm_output);
+    Serial.println();
+    #endif
   }
-  if (pwm_output > 1023) {
-    pwm_output = 1023;
-  }
-  pwm_output = map(pwm_output, 0, 1023, 0, THROTTLE_MAX);
-  // update pwm duty cycle
-  timer1.pwm(PIN_O_PWM, pwm_output);
-  #if DEBUG == true
-  Serial.print("pwm_output: ");
-  Serial.print(pwm_output);
-  Serial.println();
-  #endif
 }
 
 /**
@@ -529,12 +502,13 @@ void update_pwm_output() {
  *
  */
 void print_debug() {
+  Serial.println("print_debug");
   Serial.print("torque: ");
-  Serial.print(torque);
-  Serial.print(", torque_latest: ");
-  Serial.print(torque_latest);
+  Serial.print(torque_avg);
   Serial.print(", torque_current: ");
   Serial.print(torque_current);
+  Serial.print(", torque_reading: ");
+  Serial.print(torque_reading);
   Serial.print(", torque_sum: ");
   Serial.print(torque_sum);
   Serial.print(", torque_pas_ticks: ");
@@ -546,16 +520,16 @@ void print_debug() {
     Serial.print(torque_values[i]);
     Serial.print(", ");
   }
-  Serial.print(", cadence: ");
-  Serial.print(cadence);
+  Serial.print(", cadence_current: ");
+  Serial.print(cadence_current);
   Serial.print(", pedaling: ");
   Serial.print(pedaling);
   Serial.print(", pwm_output: ");
   Serial.print(pwm_output);
   Serial.print(", pid_out: ");
   Serial.print(pid_out);
-  Serial.print(", throttle_current: ");
-  Serial.print(throttle_current);
+  Serial.print(", throttle_reading: ");
+  Serial.print(throttle_reading);
   Serial.print(", throttle_low: ");
   Serial.print(throttle_low);
   Serial.print(", throttle_values: ");
@@ -587,16 +561,17 @@ void setup() {
   timer1.attachInterrupt(interrupt_time_tick);
   timer1.setPwmDuty(PIN_O_PWM, 0);
   attachInterrupt(digitalPinToInterrupt(PIN_I_PAS), interrupt_pas_pulse, RISING);
-  // pid controller
-  m_pid.SetMode(AUTOMATIC);
-  m_pid.SetOutputLimits(0, 1023);
-  m_pid.SetSampleTime(10);  // 10ms
+  // pid_throttle controller
+  pid_throttle.SetMode(AUTOMATIC);
+  pid_throttle.SetOutputLimits(0, 1023);
+  pid_throttle.SetSampleTime(10);  // 10ms
   // initialze variables
   for (int i=0; i < PAS_PULSES; i++) {
     torque_values[i] = 0;
   }
-  torque_low = analogRead(PIN_I_TORQUE);
-  throttle_low = analogRead(PIN_I_THROTTLE);
+  // store inital readings for torque and and throttle for min values
+  torque_low = min(analogRead(PIN_I_TORQUE) + 5, TORQUE_MIN);
+  throttle_low = min(analogRead(PIN_I_THROTTLE) + 5, THROTTLE_MIN);
 }
 
 /**
@@ -612,7 +587,7 @@ void loop() {
     // read current torque value
     read_torque();
     // update torque reading
-    update_torque(torque_current);
+    update_torque(torque_reading);
     // update setpoint
     set_point();
     update_output = true;
@@ -621,22 +596,28 @@ void loop() {
   // signal update part in main loop
   if (signal_counter > SIGNAL_UPDATE) {
     signal_counter = 0;
-    // update settings from display reading
-    read_software_serial();
     // update throttle reading
     read_throttle();
+    update_output = true;
+  }
+
+  // serial update part in main loop
+  if (serial_counter > SERIAL_UPDATE) {
+    serial_counter = 0;
+    // update settings from display reading
+    read_software_serial();
     update_output = true;
   }
 
   // the pwm output needs to be updated
   if (update_output) {
     update_output = false;
-    // update current readings of state
-    update_state();
+    // update current pas state
+    update_pas_state();
     // update new pwm duty cycle
     update_pwm_output();
     #if DEBUG == true
-      //print_debug();
+      print_debug();
     #endif
   }
 
