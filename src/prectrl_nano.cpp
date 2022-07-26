@@ -26,8 +26,11 @@
 #define THROTTLE_MIN 250                              // min throttle
 #define THROTTLE_MAX 750                              // max throttle
 #define PAS_PULSES 36                                 // number of pulses per revolution for PAS signal
-#define READINGS_AVG 20                               // number of readings to average
 #define RESET_PID_ON_PAUSE true                       // reset PID controller when brake is pressed or driver is not pedaling
+#define READINGS_AVG_TORQUE PAS_PULSES                // number of readings to average for torque
+#define READINGS_AVG_POWER_INPUT PAS_PULSES/2         // number of readings to average for power input
+#define READINGS_AVG_CADENCE PAS_PULSES/2             // number of readings to average for cadence
+#define READINGS_AVG_THROTTLE 5                       // number of readings to average for throttle
 
 #define DEBUG false
 
@@ -53,13 +56,16 @@ double torque_prev = 0.0;                             // previous torque measure
 double torque_avg = 0.0;                              // avg torque calculated in Nm
 double torque_sum = 0.0;                              // sum of torque measurements
 int torque_values[PAS_PULSES];                        // current torque measurement values
-double power_input_current = 0.0;                     // current power provided by driver (current)
-double power_input_prev = 0.0;                        // previous power provided by driver (current)
-double power_input_avg = 0.0;                         // current power provided by driver (avg)
+double power_input_current = 0.0;                     // current power provided by driver
+double power_input_prev = 0.0;                        // previous power provided by driver
+double power_input_avg = 0.0;                         // average power provided by driver
 unsigned int torque_pas_ticks = 0;                    // current pas duration in ticks
 unsigned int torque_pas_idx = 0;                      // current pas pulse index
 unsigned int throttle_reading = 0;                    // current throttle reading
 unsigned int throttle_low = 0;                        // lowest throttle measurement value (will be set at startup)
+double throttle_current = 0.0;                        // current throttle value
+double throttle_prev = 0.0;                           // previous throttle value
+double throttle_avg = 0.0;                            // average throttle value
 unsigned int pwm_output = 0;                          // new pwm output
 unsigned int last_pwm_output = 0;                     // last pwm output
 
@@ -75,7 +81,7 @@ double speed_current;                                 // calculated speed
 extern TimerOne timer1;
 double k_p = 1.03, k_i = 0.5, k_d = 0;
 double pid_in = 0, pid_out = 0, pid_set = 0;
-PID pid_throttle(&pid_in, &pid_out, &pid_set, k_p, k_i, k_d, DIRECT);
+PID pid_torque(&pid_in, &pid_out, &pid_set, k_p, k_i, k_d, DIRECT);
 SoftwareSerial display_serial = SoftwareSerial(PIN_D_RX, -1);
 SoftwareSerial controller_serial = SoftwareSerial(PIN_C_RX, -1);
 
@@ -413,7 +419,7 @@ void set_point() {
   // the target is no power input (the prectrl will try to balance out power input)
   // scaled by current support level
   pid_in = (power_input_current - power_input_avg) * factor[level_current] * -1;
-  pid_throttle.Compute();
+  pid_torque.Compute();
 
   #if DEBUG == true
   Serial.println("set_point");
@@ -428,16 +434,25 @@ void set_point() {
 }
 
 /**
- * @brief Updates the torque values for avg torque calculation
+ * @brief Updates the throttle values
+ *
+ * @param throttle_new
+ */
+void update_throttle(unsigned int throttle_new) {
+  throttle_current = map(throttle_new, throttle_low, THROTTLE_MAX, 0, 1023);
+  throttle_prev = throttle_current;
+  throttle_current = throttle_prev;
+  throttle_avg -= throttle_avg / READINGS_AVG_TORQUE;
+  throttle_avg += throttle_current / READINGS_AVG_TORQUE;
+}
+
+/**
+ * @brief Updates the torque, cadence and power input values
  *
  * @param torque_new new torque reading
  */
 void update_torque(double torque_new) {
   torque_new -= torque_low;
-  // set very low values to zero to avaid stuttering
-  if (torque_new < 5) {
-    torque_new = 0;
-  }
   torque_values[torque_pas_idx] = torque_new;
   if (torque_pas_idx++ >= PAS_PULSES - 1) {
     torque_pas_idx = 0;
@@ -447,8 +462,8 @@ void update_torque(double torque_new) {
   }
   torque_prev = torque_current;
   torque_current = torque_new;
-  torque_avg -= torque_avg / READINGS_AVG;
-  torque_avg += torque_current / READINGS_AVG;
+  torque_avg -= torque_avg / READINGS_AVG_TORQUE;
+  torque_avg += torque_current / READINGS_AVG_TORQUE;
 
   // update cadence in rpm
   cadence_prev = cadence_current;
@@ -459,8 +474,8 @@ void update_torque(double torque_new) {
   if (torque_pas_ticks > 0) {
     cadence_current = PAS_FACTOR / torque_pas_ticks;
   }
-  cadence_avg -= cadence_avg / READINGS_AVG;
-  cadence_avg += cadence_current / READINGS_AVG;
+  cadence_avg -= cadence_avg / READINGS_AVG_CADENCE;
+  cadence_avg += cadence_current / READINGS_AVG_CADENCE;
 
   // update power input in nm
   // power = 2 * pi * cadence_in_rpm * torque_in_nm / 60s
@@ -474,15 +489,15 @@ void update_torque(double torque_new) {
   }
   power_input_prev = power_input_current;
   power_input_current = 0.03455749 * cadence_current * torque_current;
-  power_input_avg -= power_input_avg / READINGS_AVG;
-  power_input_avg += power_input_current / READINGS_AVG;
+  power_input_avg -= power_input_avg / READINGS_AVG_POWER_INPUT;
+  power_input_avg += power_input_current / READINGS_AVG_POWER_INPUT;
 
   // update pid if no driver input is given
   if (brake_current || !torque_current || !pedaling) {
     if (RESET_PID_ON_PAUSE) {
-      pid_throttle.ResetIntegral();
+      pid_torque.ResetIntegral();
     } else {
-      pid_throttle.ShrinkIntegral();
+      pid_torque.ShrinkIntegral();
     }
   }
 
@@ -546,17 +561,11 @@ void update_pwm_output() {
   pwm_output = 0;
   // torque based throttle
   if (pedaling) {
-    // pid_out is in range 0-1023
     pwm_output = pid_out;
   }
   // throttle override
-  if (throttle_reading > throttle_low) {
-    // extend throttle range to 0-1023 from real low to constant high
-    unsigned int throttle_temp = map(
-      throttle_reading, throttle_low, THROTTLE_MAX, 0, 1023);
-    if (throttle_temp > THROTTLE_MIN && throttle_temp > pwm_output) {
-      pwm_output = throttle_temp;
-    }
+  if (throttle_avg && throttle_avg > pwm_output) {
+    pwm_output = throttle_current;
   }
   // ensure pwm output is within bounds
   pwm_output = constrain(pwm_output, 0, 1023);
@@ -626,25 +635,30 @@ void print_debug() {
 void setup() {
   // start serial port
   Serial.begin(115200);
+
   // start software serial port
   reset_serial_values();
   controller_serial.begin(9600);
   display_serial.begin(9600);
+
   // prepare pins
   pinMode(PIN_O_PWM, OUTPUT);           // output pwm
   pinMode(PIN_O_LGHT, OUTPUT);          // output light request
   pinMode(PIN_I_PAS, INPUT_PULLUP);     // input pas
   pinMode(PIN_I_TORQUE, INPUT);         // input torque
   pinMode(PIN_I_THROTTLE, INPUT);       // input throttle
+
   // prepare timer1
   timer1.initialize(TICK_INTERVAL);
   timer1.attachInterrupt(interrupt_time_tick);
   timer1.setPwmDuty(PIN_O_PWM, 0);
   attachInterrupt(digitalPinToInterrupt(PIN_I_PAS), interrupt_pas_pulse, RISING);
-  // pid_throttle controller
-  pid_throttle.SetMode(AUTOMATIC);
-  pid_throttle.SetOutputLimits(0, 1023);
-  pid_throttle.SetSampleTime(10);  // 10ms
+
+  // pid_torque controller
+  pid_torque.SetMode(AUTOMATIC);
+  pid_torque.SetOutputLimits(0, 1023);
+  pid_torque.SetSampleTime(10);  // 10ms
+
   // initialze variables
   for (int i=0; i < PAS_PULSES; i++) {
     torque_values[i] = 0;
@@ -673,6 +687,7 @@ void loop() {
   // throttle update part in main loop
   if (throttle_counter > THROTTLE_UPDATE) {
     read_throttle();
+    update_throttle(throttle_reading);
     update_output = true;
   }
 
