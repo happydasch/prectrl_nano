@@ -22,7 +22,7 @@
                                                       // duration for 1 pas pulse in ticks: µs/tick_interval
                                                       // duration for 1 pas pulse in ticks: µs/tick_interval
 #define TORQUE_MIN 330                                // min torque = 0 (1,5V -> needs to be calibrated)
-#define TORQUE_MAX 480                                // max torque (around 3,0V -> needs to be calibrated)
+#define TORQUE_MAX 480                                // max torque (around 3,3V -> needs to be calibrated)
 #define THROTTLE_MIN 250                              // min throttle
 #define THROTTLE_MAX 750                              // max throttle
 #define PAS_PULSES 36                                 // number of pulses per revolution for PAS signal
@@ -439,9 +439,15 @@ void set_point() {
  * @param throttle_new
  */
 void update_throttle(unsigned int throttle_new) {
-  throttle_current = map(throttle_new, throttle_low, THROTTLE_MAX, 0, 1023);
   throttle_prev = throttle_current;
-  throttle_current = throttle_prev;
+  throttle_current = map(throttle_new, throttle_low, THROTTLE_MAX, 0, 1023);
+  if (throttle_current == 0) {
+    // reset average if throttle is 0
+    throttle_avg = 0;
+  } else if (throttle_avg == 0 && throttle_current != 0) {
+    // initialize average if throttle is not 0
+    throttle_avg = throttle_current;
+  }
   throttle_avg -= throttle_avg / READINGS_AVG_TORQUE;
   throttle_avg += throttle_current / READINGS_AVG_TORQUE;
 }
