@@ -26,7 +26,8 @@
 #define THROTTLE_MIN 250                              // min throttle
 #define THROTTLE_MAX 750                              // max throttle
 #define PAS_PULSES 36                                 // number of pulses per revolution for PAS signal
-#define RESET_PID_ON_PAUSE false                      // reset PID controller when brake is pressed or driver is not pedaling
+#define READINGS_AVG 20                               // number of readings to average
+#define RESET_PID_ON_PAUSE true                       // reset PID controller when brake is pressed or driver is not pedaling
 
 #define DEBUG false
 
@@ -41,16 +42,20 @@ uint8_t serial_buffer[13];                            // buffer for received dat
 byte serial_pos = 0;                                  // counter for recieved bytes
 bool pedaling = false;                                // flag for pedaling
 double cadence_current = 0.0;                         // current cadence
+double cadence_prev = 0.0;                            // previous cadence reading
+double cadence_avg = 0.0;                             // cadence average
 double factor[] = {                                   // factors for support levels 0-5
   0.0, 0.75, 1, 1.25, 1.5, 2.0};
 int torque_reading = 0;                               // latest torque reading
 int torque_low = 0;                                   // lowest torque measurement value (will be set at startup)
 double torque_current = 0.0;                          // current torque measurement in Nm
+double torque_prev = 0.0;                             // previous torque measurement in Nm
 double torque_avg = 0.0;                              // avg torque calculated in Nm
 double torque_sum = 0.0;                              // sum of torque measurements
 int torque_values[PAS_PULSES];                        // current torque measurement values
-double power_input_avg = 0.0;                         // current power provided by driver (avg)
 double power_input_current = 0.0;                     // current power provided by driver (current)
+double power_input_prev = 0.0;                        // previous power provided by driver (current)
+double power_input_avg = 0.0;                         // current power provided by driver (avg)
 unsigned int torque_pas_ticks = 0;                    // current pas duration in ticks
 unsigned int torque_pas_idx = 0;                      // current pas pulse index
 unsigned int throttle_reading = 0;                    // current throttle reading
@@ -70,7 +75,7 @@ double speed_current;                                 // calculated speed
 extern TimerOne timer1;
 double k_p = 1.03, k_i = 0.5, k_d = 0;
 double pid_in = 0, pid_out = 0, pid_set = 0;
-PID pid_throttle(&pid_in, &pid_out, &pid_set, k_p, k_i, k_d, REVERSE);
+PID pid_throttle(&pid_in, &pid_out, &pid_set, k_p, k_i, k_d, DIRECT);
 SoftwareSerial display_serial = SoftwareSerial(PIN_D_RX, -1);
 SoftwareSerial controller_serial = SoftwareSerial(PIN_C_RX, -1);
 
@@ -180,13 +185,13 @@ void process_display_message() {
 
   #if DEBUG == true
   Serial.println("process_display_message");
-  Serial.print("light: ");
+  Serial.print("light:");
   Serial.print(light_current);
-  Serial.print(", level: ");
+  Serial.print(", level:");
   Serial.print(level_current);
-  Serial.print(", max_speed: ");
+  Serial.print(", max_speed:");
   Serial.print(max_speed_current);
-  Serial.print(", wheel_size: ");
+  Serial.print(", wheel_size:");
   Serial.print(wheel_size_current);
   Serial.println();
   #endif
@@ -213,13 +218,13 @@ void process_controller_message() {
 
   #if DEBUG == true
   Serial.println("process_controller_message");
-  Serial.print("power: ");
+  Serial.print("power:");
   Serial.print(power_current);
-  Serial.print(", brake: ");
+  Serial.print(", brake:");
   Serial.print(brake);
-  Serial.print(", rotation_ms: ");
+  Serial.print(", rotation_ms:");
   Serial.print(rotation_ms);
-  Serial.print(", speed: ");
+  Serial.print(", speed:");
   Serial.print(speed_current);
   Serial.println();
   #endif
@@ -364,7 +369,7 @@ void read_throttle() {
 
   #if DEBUG == true
   Serial.println("read_throttle");
-  Serial.print("throttle_reading: ");
+  Serial.print("throttle_reading:");
   Serial.print(throttle_reading);
   Serial.println();
   #endif
@@ -379,7 +384,7 @@ void read_torque() {
 
   #if DEBUG == true
   Serial.println("read_torque");
-  Serial.print("torque_reading: ");
+  Serial.print("torque_reading:");
   Serial.print(torque_reading);
   Serial.println();
   #endif
@@ -392,19 +397,23 @@ void read_torque() {
 void set_point() {
   // 1/3 of torque avg 2/3 of toque current and multiplied with 0.33 nm
   // see power input calculation in update_torque() for more info
-  pid_in = (torque_avg * 0.33 + torque_current * 0.67) * 0.33 * factor[level_current];
+  //pid_in = (torque_avg * 0.33 + torque_current * 0.67) * 0.33 * factor[level_current] * -1;
 
-  //pid_in = (power_input_avg * 0.33 + power_input_current * 0.67) * factor[level_current];
-  //pid_set = 200;
+  pid_in = (torque_avg + torque_current)/2 * factor[level_current] * pedaling;
+  //pid_set = (torque_current - torque_prev) * -1;
+  pid_set = torque_current - torque_prev;
+
+  //pid_in = (power_input_avg * 0.33 + power_input_current * 0.67) * factor[level_current] * -1;
+  //pid_set = (power_input_current - power_input_prev) * -1;
   pid_throttle.Compute();
 
   #if DEBUG == true
   Serial.println("set_point");
-  Serial.print("pid_in: ");
+  Serial.print("pid_in:");
   Serial.print(pid_in);
-  Serial.print(",  spid_set: ");
+  Serial.print(", pid_set:");
   Serial.print(pid_set);
-  Serial.print(", pid_out: ");
+  Serial.print(", pid_out:");
   Serial.print(pid_out);
   Serial.println();
   #endif
@@ -418,7 +427,7 @@ void set_point() {
 void update_torque(double torque_new) {
   torque_new -= torque_low;
   // set very low values to zero to avaid stuttering
-  if (torque_new < 2) {
+  if (torque_new < 5) {
     torque_new = 0;
   }
   // add current reading to valeus array
@@ -427,29 +436,33 @@ void update_torque(double torque_new) {
     torque_pas_idx = 0;
   }
   // update torque sum
-  torque_sum = 0;
-  for (int i=0; i < PAS_PULSES; i++){
-    torque_sum += torque_values[i];
-  }
-  // update current torque
-  torque_current = torque_new * pedaling;
-  // update avg torque
-  // 36/1023 = 0.03519061584: T9 has 36 pulses per revolution
-  torque_avg = 0.03519061584 * torque_sum * pedaling;
+  torque_avg -= torque_avg / READINGS_AVG;
+  torque_avg += torque_current / READINGS_AVG;
+  // update torque
+  torque_prev = torque_current;
+  torque_current = torque_new;
   // update cadence
+  cadence_prev = cadence_current;
   cadence_current = 0;
   if (torque_pas_ticks > 0) {
-    cadence_current = (PAS_FACTOR / torque_pas_ticks) * pedaling;
-    //cadence_current *= 0.5;
+    cadence_current = PAS_FACTOR / torque_pas_ticks;
+    cadence_current *= 0.5;
   }
-  // update current power input in nm
-  // power = 2 * pi * cadence * torque / 60s -> (2 * pi / 60) * cadence * torque
+  cadence_avg -= cadence_avg / READINGS_AVG;
+  cadence_avg += cadence_current / READINGS_AVG;
+  // update power input in nm
+  // power = 2 * pi * cadence_in_rpm * torque_in_nm / 60s
   // multiplication constant for SEMPU and T9 is approx. 0.33Nm/count
-  // (2 * pi / 60) = 0.10471975512
-  power_input_avg = 0.10471975512 * cadence_current * (torque_avg * 0.33);
-  power_input_current = 0.10471975512 * cadence_current * torque_current;
-  // update pid if no torque (either not pedaling or brake is pressed)
-  if (torque_current == 0 || brake_current) {
+  // 2 * pi / 60 * cadence * torque * 0.33
+  // = 2 * pi / 60 * 0.33       = 2 * 3.14159 / 60 * 0.33
+  // = 0.1047196667 * 0.33      = 0.03455749
+  // = 0.03455749 * cadence * torque
+  power_input_prev = power_input_current;
+  power_input_current = 0.03455749 * cadence_current * torque_current;
+  power_input_avg -= power_input_avg / READINGS_AVG;
+  power_input_avg += power_input_current / READINGS_AVG;
+  // update pid if no driver input is given
+  if (brake_current || !torque_current || !pedaling) {
     if (RESET_PID_ON_PAUSE) {
       pid_throttle.ResetIntegral();
     } else {
@@ -459,15 +472,15 @@ void update_torque(double torque_new) {
 
   #if DEBUG == true
   Serial.println("update_torque");
-  Serial.print("torque_current: ");
+  Serial.print("torque_current:");
   Serial.print(torque_current);
-  Serial.print(" torque_avg: ");
+  Serial.print(" torque_avg:");
   Serial.print(torque_avg);
-  Serial.print(" cadence_current: ");
+  Serial.print(" cadence_current:");
   Serial.print(cadence_current);
-  Serial.print(" power_input_avg: ");
+  Serial.print(" power_input_avg:");
   Serial.print(power_input_avg);
-  Serial.print(" power_input_current: ");
+  Serial.print(" power_input_current:");
   Serial.print(power_input_current);
   Serial.println();
   #endif
@@ -499,11 +512,11 @@ void update_pas_state() {
   }
   #if DEBUG == true
   Serial.println("update_pas_state");
-  Serial.print("pedaling: ");
+  Serial.print("pedaling:");
   Serial.print(pedaling);
-  Serial.print(" tick_pas_counter: ");
+  Serial.print(" tick_pas_counter:");
   Serial.print(tick_pas_counter);
-  Serial.print(" tick_timeout_counter: ");
+  Serial.print(" tick_timeout_counter:");
   Serial.print(tick_timeout_counter);
   Serial.println();
   #endif
@@ -537,9 +550,10 @@ void update_pwm_output() {
     // update pwm duty cycle
     timer1.pwm(PIN_O_PWM, pwm_output);
     last_pwm_output = pwm_output;
+
     #if DEBUG == true
     Serial.println("update_pwm_output");
-    Serial.print("pwm_output: ");
+    Serial.print("pwm_output:");
     Serial.print(pwm_output);
     Serial.println();
     #endif
@@ -552,39 +566,39 @@ void update_pwm_output() {
  */
 void print_debug() {
   Serial.println("print_debug");
-  Serial.print("torque: ");
+  Serial.print("torque:");
   Serial.print(torque_avg);
-  Serial.print(", torque_current: ");
+  Serial.print(", torque_current:");
   Serial.print(torque_current);
-  Serial.print(", torque_reading: ");
+  Serial.print(", torque_reading:");
   Serial.print(torque_reading);
-  Serial.print(", torque_sum: ");
+  Serial.print(", torque_sum:");
   Serial.print(torque_sum);
-  Serial.print(", torque_pas_ticks: ");
+  Serial.print(", torque_pas_ticks:");
   Serial.print(torque_pas_ticks);
-  Serial.print(", torque_pas_idx: ");
+  Serial.print(", torque_pas_idx:");
   Serial.print(torque_pas_idx);
-  Serial.print(", torque_values: ");
+  Serial.print(", torque_values:");
   for (int i=0; i < PAS_PULSES; i++){
     Serial.print(torque_values[i]);
     Serial.print(", ");
   }
-  Serial.print(", cadence_current: ");
+  Serial.print(", cadence_current:");
   Serial.print(cadence_current);
-  Serial.print(", pedaling: ");
+  Serial.print(", pedaling:");
   Serial.print(pedaling);
-  Serial.print(", pwm_output: ");
+  Serial.print(", pwm_output:");
   Serial.print(pwm_output);
-  Serial.print(", pid_out: ");
+  Serial.print(", pid_out:");
   Serial.print(pid_out);
-  Serial.print(", throttle_reading: ");
+  Serial.print(", throttle_reading:");
   Serial.print(throttle_reading);
-  Serial.print(", throttle_low: ");
+  Serial.print(", throttle_low:");
   Serial.print(throttle_low);
-  Serial.print(", throttle_values: ");
-  Serial.print(", tick_pas_counter: ");
+  Serial.print(", throttle_values:");
+  Serial.print(", tick_pas_counter:");
   Serial.print(tick_pas_counter);
-  Serial.print(", tick_timeout_counter: ");
+  Serial.print(", tick_timeout_counter:");
   Serial.print(tick_timeout_counter);
   Serial.println();
 }
