@@ -22,7 +22,9 @@
                                                       // duration for 1 pas pulse in ticks: µs/tick_interval
                                                       // duration for 1 pas pulse in ticks: µs/tick_interval
 #define TORQUE_MIN 330                                // min torque = 0 (1,5V -> needs to be calibrated)
-#define TORQUE_MAX 480                                // max torque (around 3,3V -> needs to be calibrated)
+#define TORQUE_MAX 480                                // max torque (around 3,0V -> needs to be calibrated)
+#define TORQUE_MAX_NM 102                             // max torque in Nm -> 306 torque value readings starting from torque_low
+#define TORQUE_FACTOR_NM 0.33                         // Torque reading to Nm factor
 #define THROTTLE_MIN 250                              // min throttle
 #define THROTTLE_MAX 750                              // max throttle
 #define PAS_PULSES 36                                 // number of pulses per revolution for PAS signal
@@ -30,7 +32,9 @@
 #define READINGS_AVG_POWER_INPUT PAS_PULSES/2         // number of readings to average for power input
 #define READINGS_AVG_CADENCE PAS_PULSES/2             // number of readings to average for cadence
 #define READINGS_AVG_THROTTLE 4                       // number of readings to average for throttle
-#define DEBUG false                                   // debug mode (for Serial output 115200)
+
+// debug mode (for Serial output 115200)
+#define DEBUG true
 
 // global variables
 volatile unsigned int tick_pas_counter = 0xFFFF;      // counter for ticks between two pas pulses
@@ -427,14 +431,22 @@ void update_torque(double torque_new) {
   cadence_avg += cadence / READINGS_AVG_CADENCE;
 
   // update power input in nm
+  //
   // power = 2 * pi * cadence_in_rpm * torque_in_nm / 60s
   // multiplication constant for SEMPU and T9 is approx. 0.33Nm/count
-  // 2 * pi / 60 * cadence * torque * 0.33
-  // = 2 * pi / 60 * 0.33       = 2 * 3.14159 / 60 * 0.33
-  // = 0.1047196667 * 0.33      = 0.03455749
-  // = 0.03455749 * cadence * torque
+  //
+  // 2 * pi / 60 * cadence * torque_nm
+  // = 2 * pi / 60 = 2 * 3.14159 / 60
+  // = 0.1047196667
+  // = 0.1047196667 * cadence * torque_nm
+  double torque_nm = torque * 0.33;
   power_input_prev = power_input;
-  power_input = 0.03455749 * cadence * torque;
+  power_input = (2 * 3.14159 * cadence * torque_nm) / 60;
+  Serial.print(power_input);
+  Serial.print(" - ");
+  Serial.print(0.1047196667 * cadence * torque_nm);
+  Serial.print(" <- should be the same");
+  Serial.println();
   power_input_avg -= power_input_avg / READINGS_AVG_POWER_INPUT;
   power_input_avg += power_input / READINGS_AVG_POWER_INPUT;
 }
