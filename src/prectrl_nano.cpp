@@ -30,11 +30,12 @@
 #define READINGS_AVG_POWER_INPUT PAS_PULSES/2         // number of readings to average for power input
 #define READINGS_AVG_CADENCE PAS_PULSES/2             // number of readings to average for cadence
 #define READINGS_AVG_THROTTLE 4                       // number of readings to average for throttle
+#define DEBUG false                                   // debug mode (for Serial output 115200)
 
 // global variables
 volatile unsigned int tick_pas_counter = 0xFFFF;      // counter for ticks between two pas pulses
 volatile unsigned int tick_timeout_counter = 0;       // counter for timeout between two pas pulses
-volatile unsigned int signal_counter = 0;           // counter for throttle updates
+volatile unsigned int signal_counter = 0;             // counter for throttle updates
 volatile unsigned int serial_counter = 0;             // counter for serial updates
 volatile bool interrupt_pas = false;                  // flag for pas interrupt
 
@@ -46,8 +47,13 @@ double cadence_prev = 0.0;                            // previous cadence readin
 double cadence_avg = 0.0;                             // cadence average
 double factor[] = {                                   // factors for support levels 0-5
   0.0, 0.75, 1, 1.25, 1.5, 2.0};
+int throttle_reading = 0;                             // current throttle reading
+int throttle_low = THROTTLE_MIN;                      // lowest throttle measurement value (will be set at startup)
+double throttle = 0.0;                                // current throttle value
+double throttle_prev = 0.0;                           // previous throttle value
+double throttle_avg = 0.0;                            // average throttle value
 int torque_reading = 0;                               // latest torque reading
-int torque_low = 0;                                   // lowest torque measurement value (will be set at startup)
+int torque_low = TORQUE_MIN;                          // lowest torque measurement value (will be set at startup)
 int torque_pas_ticks = 0;                             // current pas duration in ticks
 double torque = 0.0;                                  // current torque measurement in Nm
 double torque_prev = 0.0;                             // previous torque measurement in Nm
@@ -55,11 +61,6 @@ double torque_avg = 0.0;                              // avg torque calculated i
 double power_input = 0.0;                             // current power provided by driver
 double power_input_prev = 0.0;                        // previous power provided by driver
 double power_input_avg = 0.0;                         // average power provided by driver
-int throttle_reading = 0;                             // current throttle reading
-int throttle_low = 0;                                 // lowest throttle measurement value (will be set at startup)
-double throttle = 0.0;                                // current throttle value
-double throttle_prev = 0.0;                           // previous throttle value
-double throttle_avg = 0.0;                            // average throttle value
 int pwm_output = 0;                                   // new pwm output
 int pwm_output_prev = 0;                              // last pwm output
 
@@ -266,9 +267,9 @@ void reset_serial_values() {
   light_current = 0;
   wheel_size_current = 0.0;
   max_speed_current = 0;
+  speed_current = 0;
   power_current = 0;
   brake_current = false;
-  speed_current = 0;
 }
 
 /**
@@ -369,17 +370,17 @@ void set_point() {
   // the target is no power input (the prectrl will try to balance out power input)
   // scaled by current support level
   //   torque_pid_in = (power_input - power_input_avg) * factor[level_current] * -1;
-  torque_pid_set = (power_input_avg * 0.8 + power_input * 0.2) * pedaling;
-  torque_pid_in = power_input_avg * factor[level_current] * -1 * pedaling;
-  // update pid if no driver input is given
+
+  torque_pid_set = (power_input_avg * 0.7 + power_input * 0.3) * pedaling;
+  torque_pid_in = (power_input_avg * 0.7 + power_input * 0.3) * factor[level_current] * pedaling * -1;
+
+  // update pid if not pedaling
+  if (!pedaling || torque_avg <= 0) {
+    pid_torque.ShrinkIntegral();
+  }
+  // reset pid if brake is pressed
   if (brake_current) {
     pid_torque.ResetIntegral();
-    torque_pid_in = 0;
-    torque_pid_set = 0;
-  } else if (!pedaling) {
-    pid_torque.ShrinkIntegral();
-    torque_pid_in = 0;
-    torque_pid_set = 0;
   }
   pid_torque.Compute();
 }
@@ -393,7 +394,7 @@ void update_throttle(int throttle_new) {
   throttle_prev = throttle;
   throttle = map(throttle_new, throttle_low, THROTTLE_MAX, 0, 1023);
   throttle = constrain(throttle, 0, 1023);
-  if (throttle_prev != 0 && throttle == 0) {
+  if (throttle_prev > 0 && throttle == 0) {
     // reset average if throttle is 0
     throttle_avg = 0;
   }
@@ -408,7 +409,11 @@ void update_throttle(int throttle_new) {
  */
 void update_torque(double torque_new) {
   torque_prev = torque;
-  torque = constrain(torque_new - torque_low, 0, 1023);
+  torque = torque_new;
+  if (torque > 0) {
+    // if there is torque then subtract the low value from torque
+    torque = torque - torque_low;
+  }
   torque_avg -= torque_avg / READINGS_AVG_TORQUE;
   torque_avg += torque / READINGS_AVG_TORQUE;
 
@@ -416,7 +421,7 @@ void update_torque(double torque_new) {
   cadence_prev = cadence;
   cadence = 0;
   if (torque_pas_ticks > 0) {
-    cadence = PAS_FACTOR / torque_pas_ticks / 2;
+    cadence = PAS_FACTOR / torque_pas_ticks;
   }
   cadence_avg -= cadence_avg / READINGS_AVG_CADENCE;
   cadence_avg += cadence / READINGS_AVG_CADENCE;
@@ -471,8 +476,8 @@ void update_pwm_output() {
     pwm_output = torque_pid_out;
   }
   // throttle override
-  if (throttle_avg && throttle_avg > pwm_output) {
-    pwm_output = throttle;
+  if (throttle_avg > 0 && throttle_avg > pwm_output) {
+    pwm_output = throttle_avg;
   }
   // ensure pwm output is within bounds
   pwm_output = constrain(pwm_output, 0, 1023);
@@ -491,7 +496,9 @@ void update_pwm_output() {
  */
 void setup() {
   // start serial port
+  #if DEBUG == true
   Serial.begin(115200);
+  #endif
 
   // start software serial port
   reset_serial_values();
