@@ -14,9 +14,9 @@
 // misc constants
 #define TICK_INTERVAL 100                             // time interval between two timer interrupts in µs (100 == 0.1ms, 10khz)
 #define SERIAL_UPDATE 50000/TICK_INTERVAL             // interval for reading serial values (in ticks: µs/tick_interval)
-#define SERIAL_TIMEOUT 2000000/TICK_INTERVAL          // timeout of serial in serial update count (in µs/tick_interval)
+#define SERIAL_TIMEOUT 1000000/TICK_INTERVAL          // timeout of serial in serial update count (in µs/tick_interval)
 #define SIGNAL_UPDATE 10000/TICK_INTERVAL             // interval for updating signal values (in ticks: µs/tick_interval)
-#define PAS_TIMEOUT 400000/TICK_INTERVAL              // timeout for PWM with no PAS signal (in ticks: µs/tick_interval)
+#define PAS_TIMEOUT 60000/TICK_INTERVAL               // timeout for PWM with no PAS signal (in ticks: µs/tick_interval)
 #define PAS_PULSE_TIMEOUT 20000/TICK_INTERVAL         // timeout for single PAS pulses (in ticks: µs/tick_interval)
 #define PAS_FACTOR 60000000/TICK_INTERVAL/PAS_PULSES  // factor to convert PAS pulses to RPM (60.000.000ms == 60s == 1min / PAS pulses) / 2
                                                       // duration for 1 pas pulse in ticks: µs/tick_interval
@@ -360,7 +360,7 @@ void set_point() {
   // instead of just using current power input which is not accurate enough
   //
   // example 1 (torque only in nm 1/3 current and 2/3 average)
-  //   torque_pid_set = (torque_avg * 0.67 + torque * 0.33) * 0.33;  // multiplied with 0.33 for nm
+  //   torque_pid_set = (torque_avg * 0.67 + torque * 0.33) * TORQUE_FACTOR_NM;  // multiplied with 0.33 for nm
   //
   // example 2 (torque only 1/2 current and 1/2 average):
   //   torque_pid_set = (torque_avg + torque)/2;
@@ -375,10 +375,10 @@ void set_point() {
   // scaled by current support level
   //   torque_pid_in = (power_input - power_input_avg) * factor[level_current] * -1;
 
-  torque_pid_set = (power_input_avg * 0.7 + power_input * 0.3) * pedaling;
-  torque_pid_in = (power_input_avg * 0.7 + power_input * 0.3) * factor[level_current] * pedaling * -1;
+  torque_pid_set = power_input * pedaling;
+  torque_pid_in = power_input_avg * factor[level_current] * pedaling * -1;
 
-  // update pid if not pedaling
+  // update pid if not pedaling or no torque is provided
   if (!pedaling || torque_avg <= 0) {
     pid_torque.ShrinkIntegral();
   }
@@ -435,18 +435,13 @@ void update_torque(double torque_new) {
   // power = 2 * pi * cadence_in_rpm * torque_in_nm / 60s
   // multiplication constant for SEMPU and T9 is approx. 0.33Nm/count
   //
-  // 2 * pi / 60 * cadence * torque_nm
+  //   2 * pi / 60 * cadence * torque_nm
   // = 2 * pi / 60 = 2 * 3.14159 / 60
   // = 0.1047196667
   // = 0.1047196667 * cadence * torque_nm
-  double torque_nm = torque * 0.33;
+  double torque_nm = torque * TORQUE_FACTOR_NM;
   power_input_prev = power_input;
-  power_input = (2 * 3.14159 * cadence * torque_nm) / 60;
-  Serial.print(power_input);
-  Serial.print(" - ");
-  Serial.print(0.1047196667 * cadence * torque_nm);
-  Serial.print(" <- should be the same");
-  Serial.println();
+  power_input = 0.1047196667 * cadence * torque_nm;
   power_input_avg -= power_input_avg / READINGS_AVG_POWER_INPUT;
   power_input_avg += power_input / READINGS_AVG_POWER_INPUT;
 }
@@ -499,6 +494,19 @@ void update_pwm_output() {
     // update pwm duty cycle
     timer1.pwm(PIN_O_PWM, pwm_output);
     pwm_output_prev = pwm_output;
+  }
+  if (pedaling) {
+    // FIXME remove after testing
+    // output only when pedaling
+    Serial.print("pid_in:");
+    Serial.print(torque_pid_in);
+    Serial.print(" pid_set:");
+    Serial.print(torque_pid_set);
+    Serial.print(",pid_out:");
+    Serial.print(torque_pid_out);
+    Serial.print(",pwm_out:");
+    Serial.print(pwm_output);
+    Serial.println();
   }
 }
 
