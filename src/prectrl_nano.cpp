@@ -61,29 +61,5 @@ void loop() {
     update_pas_state();
     update_light_state();
     update_pwm_output();
-
-    if (pedaling) {
-      // FIXME remove after testing
-      // output only when pedaling
-      /*Serial.print("pid_in:");
-      Serial.print(torque_pid_in);
-      Serial.print(" pid_set:");
-      Serial.print(torque_pid_set);
-      Serial.print(",pid_out:");
-      Serial.print(torque_pid_out);
-      Serial.print(",pwm_out:");
-      Serial.print(pwm_output);*/
-      Serial.print("torque:");
-      Serial.print(torque);
-      Serial.print(",torque_avg:");
-      Serial.print(torque_avg);
-      Serial.print(",cadence:");
-      Serial.print(cadence);
-      Serial.print(",cadence_avg:");
-      Serial.print(cadence_avg);
-      Serial.print(",speed_current:");
-      Serial.print(speed_current);
-      Serial.println();
-    }
   }
 }

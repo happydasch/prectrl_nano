@@ -47,8 +47,8 @@ void read_throttle() {
  */
 void update_throttle(int throttle_new) {
   throttle_prev = throttle;
-  if (throttle_new && throttle_low > throttle_new) {
-    throttle_low = throttle_new;
+  if (throttle_new && throttle_low > throttle_new + SAFE_VALUE) {
+    throttle_low = throttle_new + SAFE_VALUE;
   }
   throttle = map(throttle_new, throttle_low, THROTTLE_MAX, 0, 1023);
   throttle = constrain(throttle, 0, 1023);

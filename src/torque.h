@@ -92,8 +92,8 @@ void read_torque() {
  */
 void update_torque_values(double torque_new) {
   torque_prev = torque;
-  if (torque_new && torque_low > torque_new) {
-    torque_low = torque_new;
+  if (torque_new && torque_low > torque_new + SAFE_VALUE) {
+    torque_low = torque_new + SAFE_VALUE;
   }
   torque = torque_new;
   if (!torque_avg || !torque) {
@@ -177,17 +177,32 @@ void update_pas_state() {
  */
 void set_point() {
   double torque_diff = torque - torque_avg;
+  double power_val = ((power_input_avg * speed_current) / 100);
 
   // set pid in for torque
-  torque_pid_in = torque_diff;
+  torque_pid_in = max(torque_diff, power_val);
   torque_pid_in *= factor[level_current];
 
-  // shrink pid if not pedaling or no torque is provided
+  #if DEBUG == true
+  if (pedaling) {
+    Serial.print("torque_diff:");
+    Serial.print(torque_diff);
+    Serial.print(",power_val:");
+    Serial.print(power_val);
+    Serial.print(",torque_pid_in:");
+    Serial.print(torque_pid_in);
+    Serial.print(",torque_pid_out:");
+    Serial.print(torque_pid_out);
+    Serial.print(",speed_current:");
+    Serial.print(speed_current);
+    Serial.println();
+  }
+  #endif
+
+  // reset pid if not torque is provided (for example not pedaling)
   if (!pedaling || torque_diff <= 0) {
     if (PID_RESET_ON_NO_TORQUE) {
       pid_torque.ResetIntegral();
-    } else {
-      pid_torque.ShrinkIntegral();
     }
   }
 
@@ -195,13 +210,12 @@ void set_point() {
   if (brake_current) {
     if (PID_RESET_ON_BRAKE) {
       pid_torque.ResetIntegral();
-    } else {
-      pid_torque.ShrinkIntegral();
     }
   }
 
   // compute torque_pid_out
   pid_torque.Compute();
+  pid_torque.ShrinkIntegral();
 }
 
 #endif
